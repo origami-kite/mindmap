@@ -107,3 +107,7 @@ Durable Object 使用 SQLite-backed storage。Cloudflare 当前推荐新建 Dura
 - 旧的 Build cache 导致依赖异常
 
 Build cache 可以在 `Settings → Build → Build cache` 清空后重试。
+
+
+### Browser connection status
+With y-websocket 3.x, the provider exposes `wsconnected`, `wsconnecting`, and `synced`. The UI uses these fields and logs connection status to the browser console.

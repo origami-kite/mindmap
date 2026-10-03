@@ -426,12 +426,23 @@ function flatToTree(flat) {
 }
 
 function seedDefault() {
-  const r  = mkRecord('中心主题');
-  const c1 = mkRecord('喵一');
-  const c2 = mkRecord('喵二');
-  const c3 = mkRecord('喵三');
+  // Deterministic IDs prevent duplicate initial trees if two people open a new
+  // room at nearly the same time.
+  const makeSeed = (id, text) => ({
+    id,
+    text,
+    color: null,
+    img: null,
+    collapsed: false,
+    childrenIds: []
+  });
+  const r  = makeSeed('root', '中心主题');
+  const c1 = makeSeed('seed-child-1', '喵一');
+  const c2 = makeSeed('seed-child-2', '喵二');
+  const c3 = makeSeed('seed-child-3', '喵三');
   r.childrenIds = [c1.id, c2.id, c3.id];
   ydoc.transact(() => {
+    if (yNodes.size > 0) return;
     yNodes.set(r.id, r);
     yNodes.set(c1.id, c1);
     yNodes.set(c2.id, c2);
@@ -1055,14 +1066,23 @@ function flatFromTree(node, out) {
    13. 连接状态显示
    ========================================================= */
 function updateStatus() {
-  const peers = provider.awareness ? provider.awareness.getStates().size - 1 : 0;
+  // y-websocket 3.x exposes the public connection flags as wsconnected,
+  // wsconnecting and synced. provider.connected is not the current field.
+  const connected = provider.wsconnected === true;
+  const synced = provider.synced === true;
+  const peers = provider.awareness ? Math.max(0, provider.awareness.getStates().size - 1) : 0;
   statusDot.classList.remove('online', 'connecting');
-  if (provider.connected) {
+
+  if (connected) {
     statusDot.classList.add('online');
-    statusLabel.textContent = peers > 0 ? `协作中 · ${peers + 1} 人` : '在线 · 等待加入';
+    if (!synced) {
+      statusLabel.textContent = '已连接 · 同步中…';
+    } else {
+      statusLabel.textContent = peers > 0 ? `协作中 · ${peers + 1} 人` : '在线 · 等待加入';
+    }
   } else {
     statusDot.classList.add('connecting');
-    statusLabel.textContent = '连接中…';
+    statusLabel.textContent = provider.wsconnecting === true ? '连接中…' : '正在重连…';
   }
 }
 provider.on('status', updateStatus);
@@ -1085,23 +1105,49 @@ function init() {
 
   bindEvents();
 
-  // 等 IndexedDB 加载完再决定要不要初始化数据
-  idb.whenSynced.then(() => {
+  let idbReady = false;
+  let remoteSyncReady = false;
+
+  const initializeData = (force = false) => {
+    if (!idbReady) return;
+
     if (yNodes.size === 0) {
-      // 可能别人的数据还没同步过来，稍微延迟一下再判断
-      setTimeout(() => {
-        if (yNodes.size === 0) seedDefault();
-        else refreshFromYjs();
-      }, 400);
-    } else {
-      refreshFromYjs();
+      // Prefer the first remote sync before seeding a brand-new room. The
+      // deterministic seed IDs make simultaneous initialization converge too.
+      if (remoteSyncReady || force || provider.wsconnected === false) {
+        seedDefault();
+        refreshFromYjs();
+      }
+      return;
     }
+
+    refreshFromYjs();
+  };
+
+  idb.whenSynced.then(() => {
+    idbReady = true;
+    initializeData(false);
   });
 
-  // 1.5 秒后再刷新一次，给远端同步留出时间
-  setTimeout(() => {
-    if (!root) refreshFromYjs();
-  }, 1500);
+  provider.on('sync', isSynced => {
+    remoteSyncReady = isSynced === true;
+    updateStatus();
+    initializeData(false);
+  });
+
+  provider.on('status', event => {
+    console.log('[Yjs]', event.status, {
+      wsconnected: provider.wsconnected,
+      wsconnecting: provider.wsconnecting,
+      synced: provider.synced,
+      room: roomName,
+      server: wsServer
+    });
+    updateStatus();
+  });
+
+  // Fallback for a blocked/offline network: don't leave a new room blank.
+  setTimeout(() => initializeData(true), 3000);
 }
 
 init();
