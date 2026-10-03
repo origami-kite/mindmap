@@ -298,11 +298,19 @@ if (!roomName) {
   history.replaceState(null, '', u);
 }
 
-const ydoc   = new Y.Doc();
-const yNodes = ydoc.getMap('nodes');   // 平表：id -> {id,text,color,img,collapsed,childrenIds}
+const ydoc = new Y.Doc();
+
+// LEGACY: 旧版把整条节点记录作为普通 JS 对象写进 Y.Map。
+// 保留它用于一次性迁移旧房间，但新版本不再直接写它。
+const legacyNodes = ydoc.getMap('nodes');
+
+// V2: 每个节点本身是 Y.Map，字段独立共享。
+// 这样 A 改文字时不会把 B 新增的 parent/order 等字段覆盖掉。
+const yNodeMaps = ydoc.getMap('mindmap_nodes');
+const yMeta = ydoc.getMap('mindmap_meta');
 
 // 持久化与房间初始化由 Cloudflare Durable Object 负责。
-// 浏览器端不再启用 IndexedDB，避免加入已有房间时出现本地空文档/旧文档与远端状态竞争。
+// 浏览器端不启用 IndexedDB，避免旧客户端本地副本干扰房间状态。
 
 // 实时协作：连接当前 Cloudflare Worker 自己提供的 WebSocket。
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -378,17 +386,68 @@ lightbox.addEventListener('click', () => {
 });
 
 /* =========================================================
-   6. 平表 ↔ 树 转换
+   6. V2 数据模型：字段级共享，避免并发覆盖
    ========================================================= */
-function mkRecord(text) {
+function makeNodeMap({ id, text = '新主题', color = null, img = null, collapsed = false, parentId = null, order = 0 }) {
+  const m = new Y.Map();
+  m.set('id', id);
+  m.set('text', text);
+  m.set('color', color);
+  m.set('img', img);
+  m.set('collapsed', !!collapsed);
+  m.set('parentId', parentId);
+  m.set('order', Number.isFinite(order) ? order : 0);
+  return m;
+}
+
+function readNodeMap(id, m) {
+  if (!(m instanceof Y.Map)) return null;
   return {
-    id: rid(),
-    text: text || '新主题',
-    color: null,
-    img: null,
-    collapsed: false,
+    id,
+    text: String(m.get('text') ?? ' '),
+    color: m.get('color') || null,
+    img: m.get('img') || null,
+    collapsed: !!m.get('collapsed'),
+    parentId: m.get('parentId') ?? null,
+    order: Number(m.get('order') ?? 0),
     childrenIds: []
   };
+}
+
+function snapshotFlat() {
+  const flat = {};
+  yNodeMaps.forEach((m, id) => {
+    const rec = readNodeMap(id, m);
+    if (rec) flat[id] = rec;
+  });
+
+  for (const id in flat) {
+    const pid = flat[id].parentId;
+    if (pid && flat[pid]) flat[pid].childrenIds.push(id);
+  }
+
+  for (const id in flat) {
+    flat[id].childrenIds.sort((a, b) => {
+      const ao = flat[a]?.order ?? 0;
+      const bo = flat[b]?.order ?? 0;
+      return ao - bo || a.localeCompare(b);
+    });
+  }
+  return flat;
+}
+
+function childrenOf(parentId, flat = snapshotFlat()) {
+  return (flat[parentId]?.childrenIds || []).map(id => flat[id]).filter(Boolean);
+}
+
+function inferRootId(flat) {
+  const ids = Object.keys(flat);
+  const childSet = new Set();
+  for (const id of ids) {
+    (flat[id].childrenIds || []).forEach(cid => childSet.add(cid));
+  }
+  const explicitRoot = ids.find(id => !flat[id].parentId);
+  return explicitRoot || ids.find(id => !childSet.has(id)) || ids[0] || null;
 }
 
 function flatToTree(flat) {
@@ -401,100 +460,141 @@ function flatToTree(flat) {
       color: r.color || null,
       img: r.img || null,
       collapsed: !!r.collapsed,
+      parentId: r.parentId ?? null,
+      order: Number(r.order ?? 0),
       childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds : [],
       children: []
     };
   }
-  // 找出根节点（不属于任何节点的 childrenIds）
-  const childSet = new Set();
-  for (const id in nodes) {
-    nodes[id].childrenIds.forEach(cid => childSet.add(cid));
-  }
-  let rootId = null;
-  for (const id in nodes) {
-    if (!childSet.has(id)) { rootId = id; break; }
-  }
-  if (!rootId) return null;
-  // 建立父子关系
+
+  let rootId = yMeta.get('rootId');
+  if (!rootId || !nodes[rootId]) rootId = inferRootId(nodes);
+  if (!rootId || !nodes[rootId]) return null;
+
   for (const id in nodes) {
     nodes[id].children = nodes[id].childrenIds
       .map(cid => nodes[cid])
-      .filter(Boolean);
+      .filter(Boolean)
+      .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
   }
   return nodes[rootId];
 }
 
-// 默认房间数据由 Durable Object 在服务器端首次打开房间时创建。
+function normalizeLegacyFlat(nodes) {
+  const flat = {};
+  for (const id in nodes) {
+    const r = nodes[id] || {};
+    flat[id] = {
+      id: r.id || id,
+      text: r.text || '新主题',
+      color: r.color || null,
+      img: r.img || null,
+      collapsed: !!r.collapsed,
+      parentId: null,
+      order: 0,
+      childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds.filter(Boolean) : []
+    };
+  }
+  for (const id in flat) {
+    flat[id].childrenIds.forEach((cid, idx) => {
+      if (flat[cid]) {
+        flat[cid].parentId = id;
+        flat[cid].order = idx;
+      }
+    });
+  }
+  return flat;
+}
+
+function migrateLegacyIfNeeded() {
+  if (yNodeMaps.size > 0 || legacyNodes.size === 0) return false;
+
+  const legacy = {};
+  legacyNodes.forEach((v, k) => { legacy[k] = v; });
+  const flat = normalizeLegacyFlat(legacy);
+  const rootId = inferRootId(flat);
+  if (!rootId) return false;
+
+  ydoc.transact(() => {
+    for (const id in flat) {
+      const r = flat[id];
+      yNodeMaps.set(id, makeNodeMap(r));
+    }
+    yMeta.set('schema', 2);
+    yMeta.set('rootId', rootId);
+  }, 'legacy-migration');
+
+  return true;
+}
 
 /* =========================================================
-   7. Yjs 数据操作（所有修改都走这里）
+   7. Yjs 数据操作（字段级修改，不再整条记录 set）
    ========================================================= */
 function yAddChild(parentId) {
-  const rec = yNodes.get(parentId);
-  if (!rec) return null;
-  const child = mkRecord('新主题');
+  const parent = yNodeMaps.get(parentId);
+  if (!(parent instanceof Y.Map)) return null;
+
+  const flat = snapshotFlat();
+  const siblings = childrenOf(parentId, flat);
+  const order = siblings.length ? Math.max(...siblings.map(n => n.order)) + 1 : 0;
+  const id = rid();
+
   ydoc.transact(() => {
-    yNodes.set(child.id, child);
-    yNodes.set(parentId, {
-      ...rec,
-      collapsed: false,
-      childrenIds: [...rec.childrenIds, child.id]
-    });
-  });
-  return child.id;
+    yNodeMaps.set(id, makeNodeMap({ id, text: '新主题', parentId, order }));
+    parent.set('collapsed', false);
+  }, 'add-child');
+
+  return id;
 }
 
 function yAddSibling(nodeId) {
-  const rec = yNodes.get(nodeId);
+  const rec = readNodeMap(nodeId, yNodeMaps.get(nodeId));
   if (!rec) return null;
-  // 找父节点
-  let parentId = null;
-  yNodes.forEach((v, k) => {
-    if (v.childrenIds.includes(nodeId)) parentId = k;
-  });
-  const sib = mkRecord('新主题');
-  if (!parentId) return yAddChild(nodeId);   // 根节点 → 加子节点
-  const parent = yNodes.get(parentId);
-  const idx = parent.childrenIds.indexOf(nodeId);
-  const newIds = [...parent.childrenIds];
-  newIds.splice(idx + 1, 0, sib.id);
+  if (!rec.parentId) return yAddChild(nodeId);
+
+  const flat = snapshotFlat();
+  const siblings = childrenOf(rec.parentId, flat);
+  const idx = siblings.findIndex(n => n.id === nodeId);
+  const next = siblings[idx + 1];
+  const order = next ? (rec.order + next.order) / 2 : rec.order + 1;
+  const id = rid();
+
   ydoc.transact(() => {
-    yNodes.set(sib.id, sib);
-    yNodes.set(parentId, { ...parent, childrenIds: newIds });
-  });
-  return sib.id;
+    yNodeMaps.set(id, makeNodeMap({ id, text: '新主题', parentId: rec.parentId, order }));
+    const parent = yNodeMaps.get(rec.parentId);
+    if (parent instanceof Y.Map) parent.set('collapsed', false);
+  }, 'add-sibling');
+
+  return id;
 }
 
 function yRemove(nodeId) {
-  const rec = yNodes.get(nodeId);
-  if (!rec) return;
-  // 找出父节点
-  let parentId = null;
-  yNodes.forEach((v, k) => {
-    if (v.childrenIds.includes(nodeId)) parentId = k;
-  });
-  if (!parentId) return;   // 根节点不能删
-  // 收集所有后代 id
+  const rec = readNodeMap(nodeId, yNodeMaps.get(nodeId));
+  if (!rec || !rec.parentId) return;
+
+  const flat = snapshotFlat();
   const toDelete = [];
   (function collect(id) {
     toDelete.push(id);
-    const r = yNodes.get(id);
-    if (r) r.childrenIds.forEach(collect);
+    for (const child of childrenOf(id, flat)) collect(child.id);
   })(nodeId);
-  const parent = yNodes.get(parentId);
+
   ydoc.transact(() => {
-    toDelete.forEach(id => yNodes.delete(id));
-    yNodes.set(parentId, {
-      ...parent,
-      childrenIds: parent.childrenIds.filter(c => c !== nodeId)
-    });
-  });
+    toDelete.forEach(id => yNodeMaps.delete(id));
+  }, 'remove-subtree');
 }
 
 function yUpdate(id, patch) {
-  const rec = yNodes.get(id);
-  if (!rec) return;
-  yNodes.set(id, { ...rec, ...patch });
+  const node = yNodeMaps.get(id);
+  if (!(node instanceof Y.Map)) return;
+
+  ydoc.transact(() => {
+    for (const [key, value] of Object.entries(patch || {})) {
+      if (key === 'id' || key === 'parentId' || key === 'order' || key === 'text' || key === 'color' || key === 'img' || key === 'collapsed') {
+        node.set(key, value);
+      }
+    }
+  }, 'update-node-fields');
 }
 
 /* =========================================================
@@ -625,7 +725,7 @@ function render() {
       tg.addEventListener('pointerdown', ev => ev.stopPropagation());
       tg.addEventListener('click', ev => {
         ev.stopPropagation();
-        const rec = yNodes.get(n.id);
+        const rec = readNodeMap(n.id, yNodeMaps.get(n.id));
         if (rec) yUpdate(n.id, { collapsed: !rec.collapsed });
       });
       el.appendChild(tg);
@@ -654,13 +754,15 @@ function render() {
    9. 从 Yjs 刷新
    ========================================================= */
 function refreshFromYjs() {
-  const flat = {};
-  yNodes.forEach((v, k) => { flat[k] = v; });
+  // 首选新 schema；旧房间在首次同步后自动迁移一次。
+  if (yNodeMaps.size === 0 && legacyNodes.size > 0) migrateLegacyIfNeeded();
 
+  const flat = snapshotFlat();
   if (Object.keys(flat).length === 0) {
     root = null;
     return;
   }
+
   root = flatToTree(flat);
   if (!root) return;
 
@@ -673,13 +775,18 @@ function refreshFromYjs() {
   }
 }
 
-// 数据变化时刷新
-yNodes.observe(() => {
+// 深度监听：子 Y.Map 字段发生变化时，父 Y.Map 本身不会触发普通 observe，
+// 所以这里必须使用 observeDeep。
+yNodeMaps.observeDeep(() => {
   if (editingIds.size > 0) {
     pendingRefresh = true;
     return;
   }
   refreshFromYjs();
+});
+
+yMeta.observe(() => {
+  if (editingIds.size === 0) refreshFromYjs();
 });
 
 /* =========================================================
@@ -887,11 +994,7 @@ function bindEvents() {
       }
       case 'delete': {
         if (cur === root) { alert('根节点不可删除'); return; }
-        // 选中父节点
-        let parentId = null;
-        yNodes.forEach((v, k) => {
-          if (v.childrenIds.includes(cur.id)) parentId = k;
-        });
+        const parentId = cur.parentId || null;
         yRemove(cur.id);
         if (parentId) selectNode(parentId);
         break;
@@ -917,8 +1020,7 @@ function bindEvents() {
         break;
       }
       case 'export': {
-        const flat = {};
-        yNodes.forEach((v, k) => { flat[k] = v; });
+        const flat = snapshotFlat();
         const blob = new Blob(
           [JSON.stringify({ theme: currentTheme, room: roomName, nodes: flat }, null, 2)],
           { type: 'application/json' }
@@ -964,12 +1066,15 @@ function bindEvents() {
         const d = JSON.parse(reader.result);
         const nodes = d.nodes || (d.root ? flatFromTree(d.root) : null);
         if (!nodes) throw new Error('格式错误');
+        const flat = normalizeLegacyFlat(nodes);
+        const rootId = inferRootId(flat);
+        if (!rootId) throw new Error('没有可用根节点');
         ydoc.transact(() => {
-          // 清空
-          Array.from(yNodes.keys()).forEach(k => yNodes.delete(k));
-          // 写入
-          for (const id in nodes) yNodes.set(id, nodes[id]);
-        });
+          Array.from(yNodeMaps.keys()).forEach(k => yNodeMaps.delete(k));
+          for (const id in flat) yNodeMaps.set(id, makeNodeMap(flat[id]));
+          yMeta.set('schema', 2);
+          yMeta.set('rootId', rootId);
+        }, 'import-document');
         if (d.theme && THEMES[d.theme]) {
           currentTheme = d.theme;
           viewport.style.background = THEMES[currentTheme].bg;
@@ -1001,10 +1106,7 @@ function bindEvents() {
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (cur === root) return;
-      let parentId = null;
-      yNodes.forEach((v, k) => {
-        if (v.childrenIds.includes(cur.id)) parentId = k;
-      });
+      const parentId = cur.parentId || null;
       yRemove(cur.id);
       if (parentId) selectNode(parentId);
 
@@ -1081,16 +1183,14 @@ function init() {
 
   bindEvents();
 
-  // 服务器端会在首次连接房间前确保默认 Y.Doc 已存在。
-  // 浏览器只负责接收/编辑共享文档，不再在本地创建“默认树”。
+  // 新房间由 Durable Object 提供 V2 默认文档；旧房间在首次同步后迁移。
   provider.on('sync', isSynced => {
     updateStatus();
     if (isSynced) {
-      // y-websocket 的 sync 事件在某些后端/网络时序下可能早于最终文档内容应用，
-      // 稍等一个任务周期后再补一次渲染；真正的数据变化仍由 yNodes.observe 驱动。
       setTimeout(() => {
-        if (yNodes.size > 0) refreshFromYjs();
-      }, 150);
+        migrateLegacyIfNeeded();
+        if (yNodeMaps.size > 0) refreshFromYjs();
+      }, 100);
     }
   });
 
@@ -1118,8 +1218,8 @@ function init() {
     updateStatus();
   });
 
-  // 首次脚本执行时如果 Yjs 已经因为网络/广播拿到了数据，立即渲染。
-  if (yNodes.size > 0) refreshFromYjs();
+  // 若文档已经在本地初始化完成，则立即渲染；正式同步完成后会再次刷新。
+  if (yNodeMaps.size > 0 || legacyNodes.size > 0) refreshFromYjs();
 }
 
 init();

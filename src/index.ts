@@ -1,7 +1,6 @@
 import * as Y from 'yjs'
-import { YDurableObjects } from 'y-durableobjects'
-
-export { YDurableObjects }
+import { YDurableObjects as BaseYDurableObjects } from 'y-durableobjects'
+import type { Env } from 'hono'
 
 type Bindings = {
   Y_DURABLE_OBJECTS: DurableObjectNamespace<YDurableObjects<AppEnv>>
@@ -18,43 +17,58 @@ function isValidRoom(room: string): boolean {
 
 function createDefaultDocUpdate(): Uint8Array {
   const doc = new Y.Doc()
-  const nodes = doc.getMap('nodes')
+  const meta = doc.getMap('mindmap_meta')
+  const nodes = doc.getMap('mindmap_nodes')
 
-  const makeNode = (id: string, text: string) => ({
-    id,
-    text,
-    color: null,
-    img: null,
-    collapsed: false,
-    childrenIds: [] as string[],
-  })
+  const put = (id: string, text: string, parentId: string | null, order: number) => {
+    const node = new Y.Map<unknown>()
+    node.set('id', id)
+    node.set('text', text)
+    node.set('color', null)
+    node.set('img', null)
+    node.set('collapsed', false)
+    node.set('parentId', parentId)
+    node.set('order', order)
+    nodes.set(id, node)
+  }
 
-  const root = makeNode('root', '中心主题')
-  const c1 = makeNode('seed-child-1', '喵一')
-  const c2 = makeNode('seed-child-2', '喵二')
-  const c3 = makeNode('seed-child-3', '喵三')
-  root.childrenIds = [c1.id, c2.id, c3.id]
-
-  doc.transact(() => {
-    nodes.set(root.id, root)
-    nodes.set(c1.id, c1)
-    nodes.set(c2.id, c2)
-    nodes.set(c3.id, c3)
-  })
+  put('root', '中心主题', null, 0)
+  put('seed-child-1', '喵一', 'root', 0)
+  put('seed-child-2', '喵二', 'root', 1)
+  put('seed-child-3', '喵三', 'root', 2)
+  meta.set('schema', 2)
+  meta.set('rootId', 'root')
 
   return Y.encodeStateAsUpdate(doc)
 }
 
-async function ensureRoomSeeded(stub: YDurableObjects<any>): Promise<void> {
-  // The server owns room initialization. This prevents a newly joined browser
-  // from creating a competing local default document before the remote state arrives.
-  const existing = await stub.getYDoc()
-  const probe = new Y.Doc()
-  Y.applyUpdate(probe, existing)
+/**
+ * Keep the public class name YDurableObjects so the existing Cloudflare
+ * binding stays compatible, but add a safe server-side initializer.
+ *
+ * Important: y-durableobjects' public updateYDoc() expects a websocket
+ * protocol message, not a raw Yjs update. We therefore apply the raw update
+ * directly to the protected WSSharedDoc here.
+ */
+export class YDurableObjects<T extends Env = AppEnv> extends BaseYDurableObjects<T> {
+  async ensureSeeded(): Promise<void> {
+    const probe = new Y.Doc()
+    Y.applyUpdate(probe, Y.encodeStateAsUpdate(this.doc))
 
-  if (probe.getMap('nodes').size > 0) return
+    const v2 = probe.getMap('mindmap_nodes')
+    const legacy = probe.getMap('nodes')
+    const meta = probe.getMap('mindmap_meta')
 
-  await stub.updateYDoc(createDefaultDocUpdate())
+    // Existing V2 data: never overwrite it.
+    if (v2.size > 0 || meta.get('schema') === 2) return
+
+    // Existing legacy room: let the first synchronized client migrate it.
+    if (legacy.size > 0) return
+
+    // Truly empty room: create the initial document on the server.
+    Y.applyUpdate(this.doc, createDefaultDocUpdate())
+    await this.cleanup()
+  }
 }
 
 export default {
@@ -74,9 +88,11 @@ export default {
       const id = env.Y_DURABLE_OBJECTS.idFromName(room)
       const stub = env.Y_DURABLE_OBJECTS.get(id)
 
-      await ensureRoomSeeded(stub)
+      // Serialize initialization through the Durable Object. This is safe to
+      // call for every connection because ensureSeeded() is idempotent.
+      await stub.ensureSeeded()
 
-      // y-durableobjects exposes its room endpoint as /rooms/:id.
+      // y-durableobjects exposes its websocket room endpoint as /rooms/:id.
       const doUrl = new URL(`/rooms/${encodeURIComponent(room)}`, request.url)
       const doRequest = new Request(doUrl, request)
       return stub.fetch(doRequest)
