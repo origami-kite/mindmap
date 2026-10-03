@@ -301,6 +301,8 @@ if (!roomName) {
 
 const ydoc   = new Y.Doc();
 const yNodes = ydoc.getMap('nodes');   // 平表：id -> {id,text,color,img,collapsed,childrenIds}
+// 折叠状态单独存一个 Y.Map，避免折叠操作把旧 childrenIds 一起覆盖回去。
+const yCollapsed = ydoc.getMap('collapsed');
 
 // 本地持久化：刷新不丢，离线可改
 const idb = new IndexeddbPersistence(roomName, ydoc);
@@ -401,7 +403,7 @@ function flatToTree(flat) {
       text: r.text || ' ',
       color: r.color || null,
       img: r.img || null,
-      collapsed: !!r.collapsed,
+      collapsed: yCollapsed.has(id) ? !!yCollapsed.get(id) : !!r.collapsed,
       childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds : [],
       children: []
     };
@@ -447,6 +449,10 @@ function seedDefault() {
     yNodes.set(c1.id, c1);
     yNodes.set(c2.id, c2);
     yNodes.set(c3.id, c3);
+    yCollapsed.set(r.id, false);
+    yCollapsed.set(c1.id, false);
+    yCollapsed.set(c2.id, false);
+    yCollapsed.set(c3.id, false);
   });
 }
 
@@ -461,9 +467,10 @@ function yAddChild(parentId) {
     yNodes.set(child.id, child);
     yNodes.set(parentId, {
       ...rec,
-      collapsed: false,
       childrenIds: [...rec.childrenIds, child.id]
     });
+    yCollapsed.set(child.id, false);
+    yCollapsed.set(parentId, false);
   });
   return child.id;
 }
@@ -485,6 +492,7 @@ function yAddSibling(nodeId) {
   ydoc.transact(() => {
     yNodes.set(sib.id, sib);
     yNodes.set(parentId, { ...parent, childrenIds: newIds });
+    yCollapsed.set(sib.id, false);
   });
   return sib.id;
 }
@@ -507,7 +515,10 @@ function yRemove(nodeId) {
   })(nodeId);
   const parent = yNodes.get(parentId);
   ydoc.transact(() => {
-    toDelete.forEach(id => yNodes.delete(id));
+    toDelete.forEach(id => {
+      yNodes.delete(id);
+      yCollapsed.delete(id);
+    });
     yNodes.set(parentId, {
       ...parent,
       childrenIds: parent.childrenIds.filter(c => c !== nodeId)
@@ -518,7 +529,17 @@ function yRemove(nodeId) {
 function yUpdate(id, patch) {
   const rec = yNodes.get(id);
   if (!rec) return;
-  yNodes.set(id, { ...rec, ...patch });
+
+  // collapsed 单独同步，绝不能把它和旧的 childrenIds 一起写回节点。
+  const next = { ...patch };
+  if (Object.prototype.hasOwnProperty.call(next, 'collapsed')) {
+    yCollapsed.set(id, !!next.collapsed);
+    delete next.collapsed;
+  }
+  if (Object.keys(next).length === 0) return;
+  const latest = yNodes.get(id);
+  if (!latest) return;
+  yNodes.set(id, { ...latest, ...next });
 }
 
 /* =========================================================
@@ -942,7 +963,9 @@ function bindEvents() {
       }
       case 'export': {
         const flat = {};
-        yNodes.forEach((v, k) => { flat[k] = v; });
+        yNodes.forEach((v, k) => {
+          flat[k] = { ...v, collapsed: yCollapsed.has(k) ? !!yCollapsed.get(k) : !!v.collapsed };
+        });
         const blob = new Blob(
           [JSON.stringify({ theme: currentTheme, room: roomName, nodes: flat }, null, 2)],
           { type: 'application/json' }
@@ -991,8 +1014,14 @@ function bindEvents() {
         ydoc.transact(() => {
           // 清空
           Array.from(yNodes.keys()).forEach(k => yNodes.delete(k));
+          Array.from(yCollapsed.keys()).forEach(k => yCollapsed.delete(k));
           // 写入
-          for (const id in nodes) yNodes.set(id, nodes[id]);
+          for (const id in nodes) {
+            const rec = { ...nodes[id] };
+            const collapsed = !!rec.collapsed;
+            yNodes.set(id, { ...rec, collapsed: false });
+            yCollapsed.set(id, collapsed);
+          }
         });
         if (d.theme && THEMES[d.theme]) {
           currentTheme = d.theme;
