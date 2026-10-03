@@ -301,7 +301,7 @@ if (!roomName) {
 
 const ydoc   = new Y.Doc();
 const yNodes = ydoc.getMap('nodes');   // 平表：id -> {id,text,color,img,collapsed,childrenIds}
-// 折叠状态单独存一个 Y.Map，避免折叠操作把旧 childrenIds 一起覆盖回去。
+// 折叠状态独立存储，避免切换显示状态时把整个节点记录重新写回。
 const yCollapsed = ydoc.getMap('collapsed');
 
 // 本地持久化：刷新不丢，离线可改
@@ -403,7 +403,7 @@ function flatToTree(flat) {
       text: r.text || ' ',
       color: r.color || null,
       img: r.img || null,
-      collapsed: yCollapsed.has(id) ? !!yCollapsed.get(id) : !!r.collapsed,
+      collapsed: yCollapsed.has(r.id) ? !!yCollapsed.get(r.id) : !!r.collapsed,
       childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds : [],
       children: []
     };
@@ -465,11 +465,11 @@ function yAddChild(parentId) {
   const child = mkRecord('新主题');
   ydoc.transact(() => {
     yNodes.set(child.id, child);
+    yCollapsed.set(child.id, false);
     yNodes.set(parentId, {
       ...rec,
       childrenIds: [...rec.childrenIds, child.id]
     });
-    yCollapsed.set(child.id, false);
     yCollapsed.set(parentId, false);
   });
   return child.id;
@@ -492,7 +492,6 @@ function yAddSibling(nodeId) {
   ydoc.transact(() => {
     yNodes.set(sib.id, sib);
     yNodes.set(parentId, { ...parent, childrenIds: newIds });
-    yCollapsed.set(sib.id, false);
   });
   return sib.id;
 }
@@ -529,17 +528,11 @@ function yRemove(nodeId) {
 function yUpdate(id, patch) {
   const rec = yNodes.get(id);
   if (!rec) return;
-
-  // collapsed 单独同步，绝不能把它和旧的 childrenIds 一起写回节点。
-  const next = { ...patch };
-  if (Object.prototype.hasOwnProperty.call(next, 'collapsed')) {
-    yCollapsed.set(id, !!next.collapsed);
-    delete next.collapsed;
-  }
-  if (Object.keys(next).length === 0) return;
-  const latest = yNodes.get(id);
-  if (!latest) return;
-  yNodes.set(id, { ...latest, ...next });
+  const { collapsed: ignoredCollapsed, ...rest } = patch || {};
+  const next = { ...rec, ...rest };
+  // 保持旧数据的 collapsed 字段仅作兼容，不再用它作为实时折叠状态来源。
+  if (yCollapsed.has(id)) next.collapsed = !!yCollapsed.get(id);
+  yNodes.set(id, next);
 }
 
 /* =========================================================
@@ -670,8 +663,8 @@ function render() {
       tg.addEventListener('pointerdown', ev => ev.stopPropagation());
       tg.addEventListener('click', ev => {
         ev.stopPropagation();
-        const rec = yNodes.get(n.id);
-        if (rec) yUpdate(n.id, { collapsed: !rec.collapsed });
+        const current = yCollapsed.has(n.id) ? !!yCollapsed.get(n.id) : !!n.collapsed;
+        yCollapsed.set(n.id, !current);
       });
       el.appendChild(tg);
     }
@@ -719,13 +712,16 @@ function refreshFromYjs() {
 }
 
 // 数据变化时刷新
-yNodes.observe(() => {
+function onSharedDataChange() {
   if (editingIds.size > 0) {
     pendingRefresh = true;
     return;
   }
   refreshFromYjs();
-});
+}
+
+yNodes.observe(onSharedDataChange);
+yCollapsed.observe(onSharedDataChange);
 
 /* =========================================================
    10. 视图
@@ -1017,10 +1013,9 @@ function bindEvents() {
           Array.from(yCollapsed.keys()).forEach(k => yCollapsed.delete(k));
           // 写入
           for (const id in nodes) {
-            const rec = { ...nodes[id] };
-            const collapsed = !!rec.collapsed;
-            yNodes.set(id, { ...rec, collapsed: false });
-            yCollapsed.set(id, collapsed);
+            const node = nodes[id];
+            yNodes.set(id, node);
+            yCollapsed.set(id, !!node.collapsed);
           }
         });
         if (d.theme && THEMES[d.theme]) {
