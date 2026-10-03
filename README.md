@@ -36,12 +36,12 @@ https://developers.cloudflare.com/workers/ci-cd/builds/configuration/
 `wrangler.jsonc` 里的：
 
 ```jsonc
-"name": "mindmap-collab"
+"name": "mindmap"
 ```
 
-需要与你连接 Git 仓库的 Cloudflare Worker 名称保持一致。如果你现有 Worker 不是 `mindmap-collab`，请二选一：
+需要与你连接 Git 仓库的 Cloudflare Worker 名称保持一致。如果你现有 Worker 不是 `mindmap`，请二选一：
 
-- 在 Cloudflare Dashboard 把 Worker 名称改为 `mindmap-collab`；或
+- 在 Cloudflare Dashboard 把 Worker 名称改为 `mindmap`；或
 - 修改 `wrangler.jsonc` 中的 `name` 为你现有 Worker 的名称。
 
 Cloudflare 官方把 Worker 名称不一致列为 Workers Builds 的常见失败原因。
@@ -49,7 +49,7 @@ Cloudflare 官方把 Worker 名称不一致列为 Workers Builds 的常见失败
 ## 项目结构
 
 ```text
-mindmap-collab/
+mindmap/
 ├─ public/
 │  └─ index.html
 ├─ src/

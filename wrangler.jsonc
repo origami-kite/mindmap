@@ -1,6 +1,6 @@
 {
   "$schema": "./node_modules/wrangler/config-schema.json",
-  "name": "mindmap-collab",
+  "name": "mindmap",
   "main": "src/index.ts",
   "compatibility_date": "2026-10-03",
   "assets": {
