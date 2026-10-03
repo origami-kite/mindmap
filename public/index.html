@@ -1,0 +1,1110 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>实时思维可视化（测试版）₍ᐢ.ˬ.ᐢ₎♡~</title>
+<style>
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; overflow: hidden;
+    font-family: -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    background: #0b1020;
+  }
+
+  #app { display: flex; flex-direction: column; height: 100%; }
+
+  /* ---------- 工具栏 ---------- */
+  #toolbar {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 8px;
+    padding: 9px 14px;
+    background: rgba(15, 23, 42, .88);
+    backdrop-filter: blur(12px);
+    border-bottom: 1px solid rgba(148, 163, 184, .15);
+    z-index: 20;
+    font-size: 13px; color: #cbd5e1;
+    flex: none;
+  }
+  #toolbar .brand { font-weight: 700; color: #e2e8f0; margin-right: 4px; letter-spacing: .5px; }
+  #toolbar button {
+    border: 1px solid rgba(148, 163, 184, .25);
+    background: rgba(148, 163, 184, .1);
+    color: #e2e8f0; padding: 6px 12px; border-radius: 7px;
+    cursor: pointer; font-size: 13px; font-family: inherit;
+    transition: background .15s, border-color .15s, transform .1s;
+  }
+  #toolbar button:hover  { background: rgba(148, 163, 184, .25); border-color: rgba(148,163,184,.45); }
+  #toolbar button:active { transform: scale(.96); }
+  #toolbar .sep { width: 1px; height: 20px; background: rgba(148,163,184,.25); margin: 0 4px; }
+  #toolbar .field { display: flex; align-items: center; gap: 6px; color: #94a3b8; }
+  #toolbar select {
+    background: #1e293b; color: #e2e8f0; border: 1px solid rgba(148,163,184,.3);
+    border-radius: 7px; padding: 5px 8px; font-size: 13px; font-family: inherit; cursor: pointer; outline: none;
+  }
+  #toolbar input[type=color] {
+    width: 34px; height: 28px; padding: 0; border: 1px solid rgba(148,163,184,.3);
+    border-radius: 7px; background: transparent; cursor: pointer;
+  }
+
+  /* 状态指示 */
+  .status {
+    display: inline-flex; align-items: center; gap: 6px;
+    font-size: 12px; color: #94a3b8;
+    padding: 4px 10px;
+    border: 1px solid rgba(148,163,184,.25);
+    border-radius: 20px;
+    background: rgba(148,163,184,.05);
+  }
+  .status .dot {
+    width: 8px; height: 8px; border-radius: 50%;
+    background: #94a3b8; transition: background .2s, box-shadow .2s;
+    flex: none;
+  }
+  .status .dot.online    { background: #22c55e; box-shadow: 0 0 8px #22c55e; }
+  .status .dot.connecting{ background: #f59e0b; animation: pulse 1.2s infinite; }
+  @keyframes pulse { 0%,100% { opacity: 1; } 50% { opacity: .35; } }
+
+  /* ---------- 画布区 ---------- */
+  #viewport {
+    flex: 1; position: relative; overflow: hidden;
+    cursor: grab;
+    touch-action: none;
+    background: radial-gradient(circle at 25% 15%, #1e293b 0%, #0b1020 60%);
+    transition: background .35s;
+  }
+  #viewport.dragging { cursor: grabbing; }
+  #viewport.dropping { box-shadow: inset 0 0 0 3px #38bdf8; }
+
+  #world {
+    position: absolute; left: 0; top: 0;
+    width: 0; height: 0;
+    transform-origin: 0 0;
+    will-change: transform;
+  }
+
+  #world svg {
+    position: absolute; left: 0; top: 0;
+    width: 1px; height: 1px;
+    overflow: visible;
+    pointer-events: none;
+  }
+
+  /* ---------- 节点 ---------- */
+  .node {
+    position: absolute;
+    display: flex; flex-direction: column;
+    border-radius: 11px;
+    font-size: 14px; font-weight: 500;
+    cursor: pointer;
+    user-select: none;
+    box-shadow: 0 4px 14px rgba(0, 0, 0, .28);
+    outline: 2px solid transparent; outline-offset: 3px;
+    transition: box-shadow .16s, outline-color .16s, transform .16s;
+    overflow: visible;
+  }
+  .node:hover { transform: translateY(-1px); box-shadow: 0 8px 22px rgba(0,0,0,.38); }
+  .node.selected {
+    outline-color: #fff;
+    box-shadow: 0 0 0 5px rgba(255,255,255,.16), 0 8px 24px rgba(0,0,0,.4);
+  }
+
+  .node-label {
+    flex: 1;
+    display: flex; align-items: center; justify-content: center;
+    padding: 0 14px;
+    white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+
+  .node-img {
+    display: block;
+    width: 100%; height: 100px;
+    object-fit: cover;
+    flex: none;
+    border-radius: 11px 11px 0 0;
+    cursor: zoom-in;
+    background: #0f172a;
+  }
+
+  .toggle {
+    position: absolute; right: -12px; top: 50%;
+    transform: translateY(-50%);
+    width: 22px; height: 22px; border-radius: 50%;
+    background: #fff; color: #334155;
+    font-size: 11px; font-weight: 700; line-height: 1;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; z-index: 5;
+    box-shadow: 0 2px 8px rgba(0,0,0,.35);
+    transition: transform .15s;
+  }
+  .toggle:hover { transform: translateY(-50%) scale(1.18); }
+
+  .edit-input {
+    position: absolute;
+    border: 2px solid #38bdf8; border-radius: 11px;
+    background: #0f172a; color: #fff;
+    font: 500 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif;
+    text-align: center; padding: 0 12px; outline: none; z-index: 100;
+    box-shadow: 0 0 0 5px rgba(56,189,248,.28);
+  }
+
+  /* ---------- 灯箱 ---------- */
+  #lightbox {
+    position: fixed; inset: 0; z-index: 999;
+    background: rgba(0, 0, 0, .88);
+    display: none; align-items: center; justify-content: center;
+    cursor: zoom-out;
+    backdrop-filter: blur(6px);
+  }
+  #lightbox.show { display: flex; }
+  #lightbox img {
+    max-width: 90vw; max-height: 90vh;
+    border-radius: 12px;
+    box-shadow: 0 24px 70px rgba(0,0,0,.7);
+    animation: lbIn .22s ease-out;
+  }
+  @keyframes lbIn { from { transform: scale(.9); opacity: 0; } to { transform: scale(1); opacity: 1; } }
+
+  #hint {
+    position: fixed; left: 50%; bottom: 14px; transform: translateX(-50%);
+    font-size: 12px; color: rgba(148,163,184,.75);
+    background: rgba(15,23,42,.72);
+    padding: 7px 16px; border-radius: 20px;
+    pointer-events: none; white-space: nowrap;
+    backdrop-filter: blur(8px);
+    border: 1px solid rgba(148,163,184,.12);
+  }
+  @media (max-width: 900px) { #hint { display: none; } }
+</style>
+</head>
+<body>
+<div id="app">
+  <div id="toolbar">
+    <span class="brand">🧠 思维导图喵</span>
+    <button data-act="child">＋ 子主题</button>
+    <button data-act="sibling">＋ 同级(可能有点问题)</button>
+    <button data-act="delete">🗑 删除</button>
+    <span class="sep"></span>
+    <button data-act="img">🖼 图片</button>
+    <button data-act="rmimg">✖ 移除图片(要选中节点)</button>
+    <span class="sep"></span>
+    <label class="field">主题
+      <select id="themeSel"></select>
+    </label>
+    <label class="field">颜色
+      <input type="color" id="colorPick" value="#38bdf8">
+    </label>
+    <span class="sep"></span>
+    <button data-act="center">居中</button>
+    <button data-act="share">🔗 分享</button>
+    <button data-act="export">导出</button>
+    <button data-act="import">导入</button>
+    <span class="sep"></span>
+    <span class="status" title="点击复制房间链接">
+      <span class="dot connecting" id="statusDot"></span>
+      <span id="statusLabel">连接中喵…</span>
+    </span>
+  </div>
+
+  <div id="viewport">
+    <div id="world"></div>
+  </div>
+
+  <div id="hint">拖动平移 · 滚轮缩放 · 双击改文字 · Tab 子主题 · Enter 同级 · Del 删除 · 拖拽/粘贴图片</div>
+</div>
+
+<div id="lightbox"><img alt=""></div>
+
+<input type="file" id="fileInput" accept=".json" hidden>
+<input type="file" id="imgInput" accept="image/*" hidden>
+
+<script type="module">
+import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13.6.32/+esm';
+import { WebsocketProvider } from 'https://cdn.jsdelivr.net/npm/y-websocket@3.1.0/+esm';
+import { IndexeddbPersistence } from 'https://cdn.jsdelivr.net/npm/y-indexeddb@9.0.12/+esm';
+
+/* =========================================================
+   1. 常量 & 主题
+   ========================================================= */
+const BASE_H   = 40;
+const IMG_H    = 100;
+const LABEL_H  = 32;
+const H_GAP    = 68;
+const V_GAP    = 14;
+const MAX_IMG  = 360;
+const FONT_STR = '500 14px -apple-system, BlinkMacSystemFont, "PingFang SC", "Microsoft YaHei", sans-serif';
+
+const THEMES = {
+  aurora: {
+    name: '好看的黑',
+    bg: 'radial-gradient(circle at 25% 15%, #1e293b 0%, #0b1020 60%)',
+    rootColor: '#6366f1',
+    palette: ['#38bdf8', '#818cf8', '#34d399', '#fbbf24', '#f472b6', '#22d3ee', '#a78bfa', '#4ade80']
+  },
+  paper: {
+    name: '白色',
+    bg: 'linear-gradient(160deg, #f8fafc 0%, #dbe4ee 100%)',
+    rootColor: '#334155',
+    palette: ['#0ea5e9', '#8b5cf6', '#10b981', '#f59e0b', '#ef4444', '#06b6d4', '#ec4899', '#84cc16']
+  },
+  forest: {
+    name: '右边色盘用不了不知为啥',
+    bg: 'radial-gradient(circle at 30% 20%, #14342a 0%, #06120e 70%)',
+    rootColor: '#10b981',
+    palette: ['#34d399', '#a3e635', '#22d3ee', '#fbbf24', '#4ade80', '#2dd4bf', '#86efac', '#facc15']
+  },
+  sakura: {
+    name: '但是可以正常跑这个网站',
+    bg: 'radial-gradient(circle at 70% 20%, #3b1f2e 0%, #1a0d14 70%)',
+    rootColor: '#f472b6',
+    palette: ['#fb7185', '#f9a8d4', '#c084fc', '#fbbf24', '#fda4af', '#e879f9', '#fcd34d', '#a78bfa']
+  },
+  ink: {
+    name: '放这好看就是不管了',
+    bg: 'linear-gradient(150deg, #f1f5f9 0%, #cbd5e1 100%)',
+    rootColor: '#1e293b',
+    palette: ['#475569', '#0f766e', '#b45309', '#9f1239', '#4338ca', '#065f46', '#7c2d12', '#1e40af']
+  }
+};
+
+/* =========================================================
+   2. DOM & 状态
+   ========================================================= */
+const viewport  = document.getElementById('viewport');
+const world     = document.getElementById('world');
+const themeSel  = document.getElementById('themeSel');
+const colorPick = document.getElementById('colorPick');
+const fileInput = document.getElementById('fileInput');
+const imgInput  = document.getElementById('imgInput');
+const lightbox  = document.getElementById('lightbox');
+const lbImg     = lightbox.querySelector('img');
+const statusDot = document.getElementById('statusDot');
+const statusLbl = document.getElementById('statusLabel');
+
+let root         = null;
+let selectedId   = null;
+let currentTheme = 'aurora';
+let tx = 0, ty = 0, scale = 1;
+let hasCentered  = false;
+
+/* =========================================================
+   3. Yjs 初始化
+   ========================================================= */
+// 从 URL ?room=xxx 读取房间名。没有房间时自动创建一个新的随机房间，避免所有人误进同一个默认房间。
+const params = new URLSearchParams(location.search);
+let roomName = params.get('room');
+if (!roomName) {
+  roomName = 'room-' + crypto.randomUUID().replaceAll('-', '').slice(0, 12);
+  const u = new URL(location.href);
+  u.searchParams.set('room', roomName);
+  history.replaceState(null, '', u);
+}
+
+const ydoc   = new Y.Doc();
+const yNodes = ydoc.getMap('nodes');   // 平表：id -> {id,text,color,img,collapsed,childrenIds}
+
+// 本地持久化：刷新不丢，离线可改
+const idb = new IndexeddbPersistence(roomName, ydoc);
+
+// 实时协作：连接当前 Cloudflare Worker 自己提供的 WebSocket。
+const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const wsServer = `${wsProtocol}//${location.host}/sync`;
+const provider = new WebsocketProvider(wsServer, roomName, ydoc);
+
+/* =========================================================
+   4. 通用工具
+   ========================================================= */
+const rid = () => Math.random().toString(36).slice(2, 9);
+
+const mCtx = document.createElement('canvas').getContext('2d');
+mCtx.font = FONT_STR;
+
+function isLight(hex) {
+  if (!hex || hex[0] !== '#') return false;
+  let h = hex.slice(1);
+  if (h.length === 3) h = h.split('').map(c => c + c).join('');
+  const r = parseInt(h.substr(0, 2), 16);
+  const g = parseInt(h.substr(2, 2), 16);
+  const b = parseInt(h.substr(4, 2), 16);
+  return (r * 299 + g * 587 + b * 114) / 1000 > 155;
+}
+
+function findNode(id, node) {
+  if (!node) node = root;
+  if (!id || !node) return null;
+  if (node.id === id) return node;
+  for (const c of node.children) {
+    const r = findNode(id, c);
+    if (r) return r;
+  }
+  return null;
+}
+
+/* =========================================================
+   5. 图片压缩 & 灯箱
+   ========================================================= */
+function compressImage(file, cb) {
+  if (!file || !file.type.startsWith('image/')) return;
+  const reader = new FileReader();
+  reader.onload = e => {
+    const img = new Image();
+    img.onload = () => {
+      let w = img.naturalWidth || img.width;
+      let h = img.naturalHeight || img.height;
+      if (w > MAX_IMG || h > MAX_IMG) {
+        const r = Math.min(MAX_IMG / w, MAX_IMG / h);
+        w = Math.max(1, Math.round(w * r));
+        h = Math.max(1, Math.round(h * r));
+      }
+      const cv = document.createElement('canvas');
+      cv.width = w; cv.height = h;
+      const cx = cv.getContext('2d');
+      cx.fillStyle = '#ffffff';
+      cx.fillRect(0, 0, w, h);
+      cx.drawImage(img, 0, 0, w, h);
+      cb(cv.toDataURL('image/jpeg', 0.82));
+    };
+    img.onerror = () => alert('图片读取失败');
+    img.src = e.target.result;
+  };
+  reader.readAsDataURL(file);
+}
+
+function openLightbox(src) {
+  lbImg.src = src;
+  lightbox.classList.add('show');
+}
+lightbox.addEventListener('click', () => {
+  lightbox.classList.remove('show');
+  lbImg.src = '';
+});
+
+/* =========================================================
+   6. 平表 ↔ 树 转换
+   ========================================================= */
+function mkRecord(text) {
+  return {
+    id: rid(),
+    text: text || '新主题',
+    color: null,
+    img: null,
+    collapsed: false,
+    childrenIds: []
+  };
+}
+
+function flatToTree(flat) {
+  const nodes = {};
+  for (const id in flat) {
+    const r = flat[id];
+    nodes[id] = {
+      id: r.id,
+      text: r.text || ' ',
+      color: r.color || null,
+      img: r.img || null,
+      collapsed: !!r.collapsed,
+      childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds : [],
+      children: []
+    };
+  }
+  // 找出根节点（不属于任何节点的 childrenIds）
+  const childSet = new Set();
+  for (const id in nodes) {
+    nodes[id].childrenIds.forEach(cid => childSet.add(cid));
+  }
+  let rootId = null;
+  for (const id in nodes) {
+    if (!childSet.has(id)) { rootId = id; break; }
+  }
+  if (!rootId) return null;
+  // 建立父子关系
+  for (const id in nodes) {
+    nodes[id].children = nodes[id].childrenIds
+      .map(cid => nodes[cid])
+      .filter(Boolean);
+  }
+  return nodes[rootId];
+}
+
+function seedDefault() {
+  const r  = mkRecord('中心主题');
+  const c1 = mkRecord('喵一');
+  const c2 = mkRecord('喵二');
+  const c3 = mkRecord('喵三');
+  r.childrenIds = [c1.id, c2.id, c3.id];
+  ydoc.transact(() => {
+    yNodes.set(r.id, r);
+    yNodes.set(c1.id, c1);
+    yNodes.set(c2.id, c2);
+    yNodes.set(c3.id, c3);
+  });
+}
+
+/* =========================================================
+   7. Yjs 数据操作（所有修改都走这里）
+   ========================================================= */
+function yAddChild(parentId) {
+  const rec = yNodes.get(parentId);
+  if (!rec) return null;
+  const child = mkRecord('新主题');
+  ydoc.transact(() => {
+    yNodes.set(child.id, child);
+    yNodes.set(parentId, {
+      ...rec,
+      collapsed: false,
+      childrenIds: [...rec.childrenIds, child.id]
+    });
+  });
+  return child.id;
+}
+
+function yAddSibling(nodeId) {
+  const rec = yNodes.get(nodeId);
+  if (!rec) return null;
+  // 找父节点
+  let parentId = null;
+  yNodes.forEach((v, k) => {
+    if (v.childrenIds.includes(nodeId)) parentId = k;
+  });
+  const sib = mkRecord('新主题');
+  if (!parentId) return yAddChild(nodeId);   // 根节点 → 加子节点
+  const parent = yNodes.get(parentId);
+  const idx = parent.childrenIds.indexOf(nodeId);
+  const newIds = [...parent.childrenIds];
+  newIds.splice(idx + 1, 0, sib.id);
+  ydoc.transact(() => {
+    yNodes.set(sib.id, sib);
+    yNodes.set(parentId, { ...parent, childrenIds: newIds });
+  });
+  return sib.id;
+}
+
+function yRemove(nodeId) {
+  const rec = yNodes.get(nodeId);
+  if (!rec) return;
+  // 找出父节点
+  let parentId = null;
+  yNodes.forEach((v, k) => {
+    if (v.childrenIds.includes(nodeId)) parentId = k;
+  });
+  if (!parentId) return;   // 根节点不能删
+  // 收集所有后代 id
+  const toDelete = [];
+  (function collect(id) {
+    toDelete.push(id);
+    const r = yNodes.get(id);
+    if (r) r.childrenIds.forEach(collect);
+  })(nodeId);
+  const parent = yNodes.get(parentId);
+  ydoc.transact(() => {
+    toDelete.forEach(id => yNodes.delete(id));
+    yNodes.set(parentId, {
+      ...parent,
+      childrenIds: parent.childrenIds.filter(c => c !== nodeId)
+    });
+  });
+}
+
+function yUpdate(id, patch) {
+  const rec = yNodes.get(id);
+  if (!rec) return;
+  yNodes.set(id, { ...rec, ...patch });
+}
+
+/* =========================================================
+   8. 布局 & 渲染
+   ========================================================= */
+function measure(node) {
+  const tw = mCtx.measureText(node.text || ' ').width + 34;
+  if (node.img) {
+    node._w = Math.max(140, Math.min(280, tw));
+    node._h = IMG_H + LABEL_H;
+  } else {
+    node._w = Math.max(80, Math.min(320, tw));
+    node._h = BASE_H;
+  }
+  node.children.forEach(measure);
+}
+
+function computeHeight(node) {
+  if (!node.children.length || node.collapsed) {
+    node._sh = node._h;
+    return node._h;
+  }
+  let h = 0;
+  node.children.forEach(c => { h += computeHeight(c) + V_GAP; });
+  h -= V_GAP;
+  node._sh = Math.max(node._h, h);
+  return node._sh;
+}
+
+function place(node, x, y) {
+  node._x = x;
+  node._y = y;
+  if (!node.children.length || node.collapsed) return;
+  const total = node.children.reduce((s, c) => s + c._sh, 0)
+              + V_GAP * (node.children.length - 1);
+  let cy = y - total / 2;
+  node.children.forEach(c => {
+    place(c, x + node._w + H_GAP, cy + c._sh / 2);
+    cy += c._sh + V_GAP;
+  });
+}
+
+function resolveColor(node, autoColor, isRoot) {
+  const theme = THEMES[currentTheme];
+  node._color = node.color || (isRoot ? theme.rootColor : autoColor);
+  node.children.forEach((c, i) => {
+    const auto = (node === root)
+      ? theme.palette[i % theme.palette.length]
+      : node._color;
+    resolveColor(c, auto, false);
+  });
+}
+
+let editingIds = new Set();
+let pendingRefresh = false;
+let editingEl = null;
+let editingNodeId = null;
+
+function render() {
+  if (!root) return;
+
+  measure(root);
+  computeHeight(root);
+  place(root, 0, 0);
+  resolveColor(root, null, true);
+
+  world.innerHTML = '';
+
+  const NS = 'http://www.w3.org/2000/svg';
+  const svg = document.createElementNS(NS, 'svg');
+  world.appendChild(svg);
+
+  const visible = [];
+  (function walk(n) {
+    visible.push(n);
+    if (!n.collapsed) n.children.forEach(walk);
+  })(root);
+
+  // 连线
+  visible.forEach(n => {
+    if (n.collapsed) return;
+    n.children.forEach(c => {
+      const x1 = n._x + n._w, y1 = n._y;
+      const x2 = c._x,         y2 = c._y;
+      const dx = Math.max(24, (x2 - x1) * 0.5);
+      const p = document.createElementNS(NS, 'path');
+      p.setAttribute('d', `M${x1},${y1} C${x1 + dx},${y1} ${x2 - dx},${y2} ${x2},${y2}`);
+      p.setAttribute('fill', 'none');
+      p.setAttribute('stroke', c._color);
+      p.setAttribute('stroke-width', '2.5');
+      p.setAttribute('stroke-linecap', 'round');
+      p.setAttribute('opacity', '0.9');
+      svg.appendChild(p);
+    });
+  });
+
+  // 节点
+  const frag = document.createDocumentFragment();
+  visible.forEach(n => {
+    const el = document.createElement('div');
+    el.className = 'node' + (n.id === selectedId ? ' selected' : '');
+    el.dataset.id  = n.id;
+    el.style.left   = n._x + 'px';
+    el.style.top    = (n._y - n._h / 2) + 'px';
+    el.style.width  = n._w + 'px';
+    el.style.height = n._h + 'px';
+    el.style.background = n._color;
+    el.style.color = isLight(n._color) ? '#0f172a' : '#ffffff';
+
+    if (n.img) {
+      const im = document.createElement('img');
+      im.className = 'node-img';
+      im.src = n.img;
+      im.draggable = false;
+      im.alt = '';
+      el.appendChild(im);
+    }
+    const label = document.createElement('div');
+    label.className = 'node-label';
+    label.textContent = n.text;
+    el.appendChild(label);
+
+    if (n.children.length) {
+      const tg = document.createElement('div');
+      tg.className = 'toggle';
+      tg.textContent = n.collapsed ? String(n.children.length) : '−';
+      tg.title = n.collapsed ? '展开' : '折叠';
+      tg.addEventListener('pointerdown', ev => ev.stopPropagation());
+      tg.addEventListener('click', ev => {
+        ev.stopPropagation();
+        const rec = yNodes.get(n.id);
+        if (rec) yUpdate(n.id, { collapsed: !rec.collapsed });
+      });
+      el.appendChild(tg);
+    }
+    frag.appendChild(el);
+  });
+  world.appendChild(frag);
+
+  // 重新挂载编辑框（如果正在编辑）
+  if (editingNodeId && editingEl) {
+    const n = findNode(editingNodeId);
+    if (n) {
+      editingEl.style.left   = n._x + 'px';
+      editingEl.style.top    = (n._y - n._h / 2) + 'px';
+      editingEl.style.width  = n._w + 'px';
+      world.appendChild(editingEl);
+    }
+  }
+
+  const sel = findNode(selectedId);
+  if (sel && sel._color) colorPick.value = sel._color;
+  themeSel.value = currentTheme;
+}
+
+/* =========================================================
+   9. 从 Yjs 刷新
+   ========================================================= */
+function refreshFromYjs() {
+  const flat = {};
+  yNodes.forEach((v, k) => { flat[k] = v; });
+
+  if (Object.keys(flat).length === 0) {
+    root = null;
+    return;
+  }
+  root = flatToTree(flat);
+  if (!root) return;
+
+  if (!findNode(selectedId)) selectedId = root.id;
+  render();
+
+  if (!hasCentered) {
+    hasCentered = true;
+    setTimeout(centerView, 60);
+  }
+}
+
+// 数据变化时刷新
+yNodes.observe(() => {
+  if (editingIds.size > 0) {
+    pendingRefresh = true;
+    return;
+  }
+  refreshFromYjs();
+});
+
+/* =========================================================
+   10. 视图
+   ========================================================= */
+function applyTransform() {
+  world.style.transform = `translate(${tx}px, ${ty}px) scale(${scale})`;
+}
+
+function centerView() {
+  if (!root) return;
+  tx = viewport.clientWidth  / 2 - (root._x + root._w / 2) * scale;
+  ty = viewport.clientHeight / 2 - root._y * scale;
+  applyTransform();
+}
+
+/* =========================================================
+   11. 选中 / 编辑
+   ========================================================= */
+function selectNode(id) {
+  selectedId = id;
+  document.querySelectorAll('.node').forEach(el => {
+    el.classList.toggle('selected', el.dataset.id === id);
+  });
+  const n = findNode(id);
+  if (n && n._color) colorPick.value = n._color;
+}
+
+function startEdit(node) {
+  if (editingIds.has(node.id)) return;
+
+  const input = document.createElement('input');
+  input.className = 'edit-input';
+  input.value = node.text;
+  input.style.left   = node._x + 'px';
+  input.style.top    = (node._y - node._h / 2) + 'px';
+  input.style.width  = node._w + 'px';
+  input.style.height = BASE_H + 'px';
+
+  editingIds.add(node.id);
+  editingEl = input;
+  editingNodeId = node.id;
+
+  world.appendChild(input);
+  input.focus();
+  input.select();
+
+  const commit = ok => {
+    if (!editingIds.has(node.id)) return;
+    editingIds.delete(node.id);
+    editingEl = null;
+    editingNodeId = null;
+    const v = input.value.trim();
+    input.remove();
+
+    if (ok && v && v !== node.text) {
+      yUpdate(node.id, { text: v });
+    } else if (pendingRefresh && editingIds.size === 0) {
+      pendingRefresh = false;
+      refreshFromYjs();
+    } else {
+      render();
+    }
+  };
+
+  input.addEventListener('keydown', ev => {
+    ev.stopPropagation();
+    if (ev.key === 'Enter')       commit(true);
+    else if (ev.key === 'Escape') commit(false);
+  });
+  input.addEventListener('blur', () => commit(true));
+}
+
+/* =========================================================
+   12. 事件
+   ========================================================= */
+let pendingImgNodeId = null;
+
+function bindEvents() {
+
+  /* ---- 点击节点 / 图片 ---- */
+  world.addEventListener('click', e => {
+    const im = e.target.closest('.node-img');
+    if (im) {
+      openLightbox(im.src);
+      e.stopPropagation();
+      return;
+    }
+    const el = e.target.closest('.node');
+    if (!el) return;
+    selectNode(el.dataset.id);
+  });
+
+  world.addEventListener('dblclick', e => {
+    const el = e.target.closest('.node');
+    if (!el) return;
+    const n = findNode(el.dataset.id);
+    if (n) startEdit(n);
+  });
+
+  /* ---- 拖动平移 ---- */
+  let dragging = false, sx = 0, sy = 0, stx = 0, sty = 0;
+
+  viewport.addEventListener('pointerdown', e => {
+    if (e.target.closest('.node') || e.target.tagName === 'INPUT') return;
+    selectNode(null);
+    dragging = true;
+    sx = e.clientX; sy = e.clientY;
+    stx = tx;       sty = ty;
+    viewport.classList.add('dragging');
+    viewport.setPointerCapture(e.pointerId);
+  });
+
+  viewport.addEventListener('pointermove', e => {
+    if (!dragging) return;
+    tx = stx + (e.clientX - sx);
+    ty = sty + (e.clientY - sy);
+    applyTransform();
+  });
+
+  const endDrag = e => {
+    if (!dragging) return;
+    dragging = false;
+    viewport.classList.remove('dragging');
+    try { viewport.releasePointerCapture(e.pointerId); } catch (_) {}
+  };
+  viewport.addEventListener('pointerup', endDrag);
+  viewport.addEventListener('pointercancel', endDrag);
+
+  /* ---- 滚轮缩放 ---- */
+  viewport.addEventListener('wheel', e => {
+    e.preventDefault();
+    const rect = viewport.getBoundingClientRect();
+    const mx = e.clientX - rect.left;
+    const my = e.clientY - rect.top;
+    const old = scale;
+    const factor = e.deltaY < 0 ? 1.12 : 1 / 1.12;
+    scale = Math.min(2.5, Math.max(0.25, scale * factor));
+    tx = mx - (mx - tx) * (scale / old);
+    ty = my - (my - ty) * (scale / old);
+    applyTransform();
+  }, { passive: false });
+
+  /* ---- 拖拽图片 ---- */
+  viewport.addEventListener('dragover', e => {
+    if (!e.dataTransfer.types.includes('Files')) return;
+    e.preventDefault();
+    viewport.classList.add('dropping');
+  });
+  viewport.addEventListener('dragleave', () => viewport.classList.remove('dropping'));
+  viewport.addEventListener('drop', e => {
+    e.preventDefault();
+    viewport.classList.remove('dropping');
+    const f = e.dataTransfer.files && e.dataTransfer.files[0];
+    if (!f || !f.type.startsWith('image/')) return;
+    const cur = findNode(selectedId) || root;
+    if (!cur) return;
+    compressImage(f, dataUrl => yUpdate(cur.id, { img: dataUrl }));
+  });
+
+  /* ---- 粘贴图片 ---- */
+  document.addEventListener('paste', e => {
+    const items = (e.clipboardData && e.clipboardData.items) || [];
+    for (const it of items) {
+      if (it.type && it.type.startsWith('image/')) {
+        const f = it.getAsFile();
+        const cur = findNode(selectedId) || root;
+        if (!cur) return;
+        compressImage(f, dataUrl => yUpdate(cur.id, { img: dataUrl }));
+        e.preventDefault();
+        break;
+      }
+    }
+  });
+
+  /* ---- 图片文件选择器 ---- */
+  imgInput.addEventListener('change', () => {
+    const f = imgInput.files && imgInput.files[0];
+    const targetId = pendingImgNodeId || selectedId || (root && root.id);
+    if (f && targetId) {
+      compressImage(f, dataUrl => yUpdate(targetId, { img: dataUrl }));
+    }
+    imgInput.value = '';
+    pendingImgNodeId = null;
+  });
+
+  /* ---- 工具栏 ---- */
+  document.getElementById('toolbar').addEventListener('click', e => {
+    const btn = e.target.closest('button[data-act]');
+    if (!btn) return;
+    const act = btn.dataset.act;
+    const cur = findNode(selectedId) || root;
+    if (!cur) return;
+
+    switch (act) {
+      case 'child': {
+        const id = yAddChild(cur.id);
+        if (id) selectNode(id);
+        break;
+      }
+      case 'sibling': {
+        const id = yAddSibling(cur.id);
+        if (id) selectNode(id);
+        break;
+      }
+      case 'delete': {
+        if (cur === root) { alert('根节点不可删除'); return; }
+        // 选中父节点
+        let parentId = null;
+        yNodes.forEach((v, k) => {
+          if (v.childrenIds.includes(cur.id)) parentId = k;
+        });
+        yRemove(cur.id);
+        if (parentId) selectNode(parentId);
+        break;
+      }
+      case 'img': {
+        pendingImgNodeId = cur.id;
+        imgInput.click();
+        break;
+      }
+      case 'rmimg': {
+        if (!cur.img) { alert('该节点还没有图片'); return; }
+        yUpdate(cur.id, { img: null });
+        break;
+      }
+      case 'center': centerView(); break;
+      case 'share': {
+        const url = new URL(location.href);
+        url.searchParams.set('room', roomName);
+        navigator.clipboard.writeText(url.toString()).then(
+          () => alert('链接已复制，发给朋友即可协作：\n' + url.toString()),
+          () => prompt('复制这个链接分享给朋友：', url.toString())
+        );
+        break;
+      }
+      case 'export': {
+        const flat = {};
+        yNodes.forEach((v, k) => { flat[k] = v; });
+        const blob = new Blob(
+          [JSON.stringify({ theme: currentTheme, room: roomName, nodes: flat }, null, 2)],
+          { type: 'application/json' }
+        );
+        const a = document.createElement('a');
+        a.href = URL.createObjectURL(blob);
+        a.download = 'mindmap.json';
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+        break;
+      }
+      case 'import': fileInput.click(); break;
+    }
+  });
+
+  /* ---- 主题切换（本地偏好，不参与协作同步） ---- */
+  themeSel.addEventListener('change', () => {
+    currentTheme = themeSel.value;
+    viewport.style.background = THEMES[currentTheme].bg;
+    render();
+  });
+
+  /* ---- 颜色修改 ---- */
+  let colorRaf = null;
+  let pendingColor = null;
+  colorPick.addEventListener('input', () => {
+    pendingColor = colorPick.value;
+    if (colorRaf) return;
+    colorRaf = requestAnimationFrame(() => {
+      colorRaf = null;
+      const n = findNode(selectedId);
+      if (n && pendingColor) yUpdate(n.id, { color: pendingColor });
+    });
+  });
+
+  /* ---- 导入 JSON ---- */
+  fileInput.addEventListener('change', () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      try {
+        const d = JSON.parse(reader.result);
+        const nodes = d.nodes || (d.root ? flatFromTree(d.root) : null);
+        if (!nodes) throw new Error('格式错误');
+        ydoc.transact(() => {
+          // 清空
+          Array.from(yNodes.keys()).forEach(k => yNodes.delete(k));
+          // 写入
+          for (const id in nodes) yNodes.set(id, nodes[id]);
+        });
+        if (d.theme && THEMES[d.theme]) {
+          currentTheme = d.theme;
+          viewport.style.background = THEMES[currentTheme].bg;
+        }
+      } catch (err) {
+        alert('导入失败：' + err.message);
+      }
+    };
+    reader.readAsText(f);
+    fileInput.value = '';
+  });
+
+  /* ---- 快捷键 ---- */
+  document.addEventListener('keydown', e => {
+    if (e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT') return;
+    const cur = findNode(selectedId) || root;
+    if (!cur) return;
+
+    if (e.key === 'Tab') {
+      e.preventDefault();
+      const id = yAddChild(cur.id);
+      if (id) selectNode(id);
+
+    } else if (e.key === 'Enter') {
+      e.preventDefault();
+      const id = yAddSibling(cur.id);
+      if (id) selectNode(id);
+
+    } else if (e.key === 'Delete' || e.key === 'Backspace') {
+      e.preventDefault();
+      if (cur === root) return;
+      let parentId = null;
+      yNodes.forEach((v, k) => {
+        if (v.childrenIds.includes(cur.id)) parentId = k;
+      });
+      yRemove(cur.id);
+      if (parentId) selectNode(parentId);
+
+    } else if (e.key === 'F2') {
+      e.preventDefault();
+      startEdit(cur);
+
+    } else if (e.key === 'Escape') {
+      if (lightbox.classList.contains('show')) {
+        lightbox.classList.remove('show');
+        lbImg.src = '';
+      } else {
+        selectNode(null);
+      }
+    }
+  });
+}
+
+// 备用：从旧版树形数据转回平表
+function flatFromTree(node, out) {
+  out = out || {};
+  out[node.id] = {
+    id: node.id,
+    text: node.text,
+    color: node.color || null,
+    img: node.img || null,
+    collapsed: !!node.collapsed,
+    childrenIds: (node.children || []).map(c => c.id)
+  };
+  (node.children || []).forEach(c => flatFromTree(c, out));
+  return out;
+}
+
+/* =========================================================
+   13. 连接状态显示
+   ========================================================= */
+function updateStatus() {
+  const peers = provider.awareness ? provider.awareness.getStates().size - 1 : 0;
+  statusDot.classList.remove('online', 'connecting');
+  if (provider.connected) {
+    statusDot.classList.add('online');
+    statusLabel.textContent = peers > 0 ? `协作中 · ${peers + 1} 人` : '在线 · 等待加入';
+  } else {
+    statusDot.classList.add('connecting');
+    statusLabel.textContent = '连接中…';
+  }
+}
+provider.on('status', updateStatus);
+provider.awareness.on('change', updateStatus);
+setInterval(updateStatus, 2000);
+
+/* =========================================================
+   14. 启动
+   ========================================================= */
+function init() {
+  // 填充主题下拉
+  Object.keys(THEMES).forEach(k => {
+    const o = document.createElement('option');
+    o.value = k;
+    o.textContent = THEMES[k].name;
+    themeSel.appendChild(o);
+  });
+
+  viewport.style.background = THEMES[currentTheme].bg;
+
+  bindEvents();
+
+  // 等 IndexedDB 加载完再决定要不要初始化数据
+  idb.whenSynced.then(() => {
+    if (yNodes.size === 0) {
+      // 可能别人的数据还没同步过来，稍微延迟一下再判断
+      setTimeout(() => {
+        if (yNodes.size === 0) seedDefault();
+        else refreshFromYjs();
+      }, 400);
+    } else {
+      refreshFromYjs();
+    }
+  });
+
+  // 1.5 秒后再刷新一次，给远端同步留出时间
+  setTimeout(() => {
+    if (!root) refreshFromYjs();
+  }, 1500);
+}
+
+init();
+</script>
+</body>
+</html>

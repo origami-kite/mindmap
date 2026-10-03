@@ -1,0 +1,23 @@
+{
+  "name": "mindmap-collab-cloudflare",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy",
+    "types": "wrangler types",
+    "check": "tsc --noEmit",
+    "build": "node -e \"console.log('No frontend build step required; Wrangler bundles the Worker and uploads /public as assets.')\"",
+    "preview": "wrangler preview"
+  },
+  "dependencies": {
+    "hono": "^4.13.7",
+    "y-durableobjects": "1.0.5"
+  },
+  "devDependencies": {
+    "@cloudflare/workers-types": "5.20261003.1",
+    "typescript": "^5.8.3",
+    "wrangler": "4.68.0"
+  }
+}
