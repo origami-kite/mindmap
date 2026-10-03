@@ -220,7 +220,6 @@
 <script type="module">
 import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13.6.32/+esm';
 import { WebsocketProvider } from 'https://cdn.jsdelivr.net/npm/y-websocket@3.1.0/+esm';
-import { IndexeddbPersistence } from 'https://cdn.jsdelivr.net/npm/y-indexeddb@9.0.12/+esm';
 
 /* =========================================================
    1. 常量 & 主题
@@ -302,8 +301,8 @@ if (!roomName) {
 const ydoc   = new Y.Doc();
 const yNodes = ydoc.getMap('nodes');   // 平表：id -> {id,text,color,img,collapsed,childrenIds}
 
-// 本地持久化：刷新不丢，离线可改
-const idb = new IndexeddbPersistence(roomName, ydoc);
+// 持久化与房间初始化由 Cloudflare Durable Object 负责。
+// 浏览器端不再启用 IndexedDB，避免加入已有房间时出现本地空文档/旧文档与远端状态竞争。
 
 // 实时协作：连接当前 Cloudflare Worker 自己提供的 WebSocket。
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
@@ -425,30 +424,7 @@ function flatToTree(flat) {
   return nodes[rootId];
 }
 
-function seedDefault() {
-  // Deterministic IDs prevent duplicate initial trees if two people open a new
-  // room at nearly the same time.
-  const makeSeed = (id, text) => ({
-    id,
-    text,
-    color: null,
-    img: null,
-    collapsed: false,
-    childrenIds: []
-  });
-  const r  = makeSeed('root', '中心主题');
-  const c1 = makeSeed('seed-child-1', '喵一');
-  const c2 = makeSeed('seed-child-2', '喵二');
-  const c3 = makeSeed('seed-child-3', '喵三');
-  r.childrenIds = [c1.id, c2.id, c3.id];
-  ydoc.transact(() => {
-    if (yNodes.size > 0) return;
-    yNodes.set(r.id, r);
-    yNodes.set(c1.id, c1);
-    yNodes.set(c2.id, c2);
-    yNodes.set(c3.id, c3);
-  });
-}
+// 默认房间数据由 Durable Object 在服务器端首次打开房间时创建。
 
 /* =========================================================
    7. Yjs 数据操作（所有修改都走这里）
@@ -1105,34 +1081,17 @@ function init() {
 
   bindEvents();
 
-  let idbReady = false;
-  let remoteSyncReady = false;
-
-  const initializeData = (force = false) => {
-    if (!idbReady) return;
-
-    if (yNodes.size === 0) {
-      // Prefer the first remote sync before seeding a brand-new room. The
-      // deterministic seed IDs make simultaneous initialization converge too.
-      if (remoteSyncReady || force || provider.wsconnected === false) {
-        seedDefault();
-        refreshFromYjs();
-      }
-      return;
-    }
-
-    refreshFromYjs();
-  };
-
-  idb.whenSynced.then(() => {
-    idbReady = true;
-    initializeData(false);
-  });
-
+  // 服务器端会在首次连接房间前确保默认 Y.Doc 已存在。
+  // 浏览器只负责接收/编辑共享文档，不再在本地创建“默认树”。
   provider.on('sync', isSynced => {
-    remoteSyncReady = isSynced === true;
     updateStatus();
-    initializeData(false);
+    if (isSynced) {
+      // y-websocket 的 sync 事件在某些后端/网络时序下可能早于最终文档内容应用，
+      // 稍等一个任务周期后再补一次渲染；真正的数据变化仍由 yNodes.observe 驱动。
+      setTimeout(() => {
+        if (yNodes.size > 0) refreshFromYjs();
+      }, 150);
+    }
   });
 
   provider.on('status', event => {
@@ -1146,8 +1105,21 @@ function init() {
     updateStatus();
   });
 
-  // Fallback for a blocked/offline network: don't leave a new room blank.
-  setTimeout(() => initializeData(true), 3000);
+  provider.on('connection-error', event => {
+    console.error('[Yjs] connection-error', event);
+    updateStatus();
+  });
+
+  provider.on('connection-close', event => {
+    console.warn('[Yjs] connection-close', {
+      code: event?.code,
+      reason: event?.reason
+    });
+    updateStatus();
+  });
+
+  // 首次脚本执行时如果 Yjs 已经因为网络/广播拿到了数据，立即渲染。
+  if (yNodes.size > 0) refreshFromYjs();
 }
 
 init();

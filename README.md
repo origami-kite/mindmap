@@ -6,7 +6,7 @@
 - Durable Objects：每个 room 一个协作实例
 - y-durableobjects：Yjs WebSocket 协作与持久化
 - Yjs / y-websocket：浏览器端 CRDT 实时同步
-- IndexedDB：本地离线缓存
+- Durable Object 服务器持久化：本地离线缓存
 
 ## GitHub → Cloudflare Workers Builds（推荐）
 
@@ -111,3 +111,22 @@ Build cache 可以在 `Settings → Build → Build cache` 清空后重试。
 
 ### Browser connection status
 With y-websocket 3.x, the provider exposes `wsconnected`, `wsconnecting`, and `synced`. The UI uses these fields and logs connection status to the browser console.
+## 初始化与多人加入
+
+房间首次打开时，客户端会先等待 Yjs WebSocket 完成第一次服务器同步，再判断房间是否为空。只有确认房间为空才会创建默认思维导图，避免第二个浏览器在同步前写入默认数据而干扰已有协作者。
+
+
+
+## 说明：房间初始化（1.1.0）
+
+默认思维导图现在由 Durable Object 在服务器端首次创建房间时生成。浏览器端不再通过 IndexedDB 或随机/本地 seed 创建默认树，避免新成员加入已有房间时出现状态竞争。
+
+首次验证建议使用一个全新的 `?room=` 房间；之前测试版本产生过重复根节点的旧房间可能已经保存了历史冲突数据。
+
+
+## 升级后的协作机制
+
+- Durable Object 在 WebSocket 建立前确保房间已经有共享 Y.Doc。
+- 浏览器端不再使用 IndexedDB 初始化房间，也不再生成默认根节点。
+- 加入已有房间时，客户端只接收服务器状态，因此不会因为本地空文档而把房间切换成另一份树。
+- 旧测试房间如果曾经出现过重复根节点，建议先用网站首页生成一个新的 `room-...` 链接测试。
