@@ -218,7 +218,7 @@
 <input type="file" id="imgInput" accept="image/*" hidden>
 
 <script type="module">
-import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13.6.32/+esm';
+import * as Y from 'https://cdn.jsdelivr.net/npm/yjs@13/+esm';
 import { WebsocketProvider } from 'https://cdn.jsdelivr.net/npm/y-websocket@3.1.0/+esm';
 
 /* =========================================================
@@ -288,7 +288,8 @@ let hasCentered  = false;
 /* =========================================================
    3. Yjs 初始化
    ========================================================= */
-// 从 URL ?room=xxx 读取房间名。没有房间时自动创建一个新的随机房间，避免所有人误进同一个默认房间。
+// 每个 URL ?room=... 对应一个独立的 Durable Object 房间。
+// 没有 room 参数时自动生成新房间，避免陌生人进入同一个默认房间。
 const params = new URLSearchParams(location.search);
 let roomName = params.get('room');
 if (!roomName) {
@@ -300,23 +301,18 @@ if (!roomName) {
 
 const ydoc = new Y.Doc();
 
-// LEGACY: 旧版把整条节点记录作为普通 JS 对象写进 Y.Map。
-// 保留它用于一次性迁移旧房间，但新版本不再直接写它。
-const legacyNodes = ydoc.getMap('nodes');
+// V3 数据空间：使用嵌套 Y.Map + Y.Array。
+// 旧版本使用的 'nodes' / 'mindmap_nodes' 不再作为当前数据源，
+// 这样旧测试房间不会把半成品结构带进新协作逻辑。
+const yNodes = ydoc.getMap('mindmap_nodes_v3');
+const yMeta  = ydoc.getMap('mindmap_meta_v3');
 
-// V2: 每个节点本身是 Y.Map，字段独立共享。
-// 这样 A 改文字时不会把 B 新增的 parent/order 等字段覆盖掉。
-const yNodeMaps = ydoc.getMap('mindmap_nodes');
-const yMeta = ydoc.getMap('mindmap_meta');
-
-// 持久化与房间初始化由 Cloudflare Durable Object 负责。
-// 浏览器端不启用 IndexedDB，避免旧客户端本地副本干扰房间状态。
-
-// 实时协作：连接当前 Cloudflare Worker 自己提供的 WebSocket。
 const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsServer = `${wsProtocol}//${location.host}/sync`;
-const provider = new WebsocketProvider(wsServer, roomName, ydoc);
-
+const provider = new WebsocketProvider(wsServer, roomName, ydoc, {
+  connect: true,
+  disableBc: true
+});
 /* =========================================================
    4. 通用工具
    ========================================================= */
@@ -386,68 +382,64 @@ lightbox.addEventListener('click', () => {
 });
 
 /* =========================================================
-   6. V2 数据模型：字段级共享，避免并发覆盖
+   6. Yjs 数据模型
    ========================================================= */
-function makeNodeMap({ id, text = '新主题', color = null, img = null, collapsed = false, parentId = null, order = 0 }) {
+function newChildrenArray() {
+  return new Y.Array();
+}
+
+function makeNode(id, text = '新主题') {
   const m = new Y.Map();
   m.set('id', id);
   m.set('text', text);
-  m.set('color', color);
-  m.set('img', img);
-  m.set('collapsed', !!collapsed);
-  m.set('parentId', parentId);
-  m.set('order', Number.isFinite(order) ? order : 0);
+  m.set('color', null);
+  m.set('img', null);
+  m.set('collapsed', false);
+  m.set('childrenIds', newChildrenArray());
   return m;
 }
 
-function readNodeMap(id, m) {
-  if (!(m instanceof Y.Map)) return null;
+function isSharedMap(v) {
+  return !!v && typeof v.get === 'function' && typeof v.set === 'function';
+}
+
+function isSharedArray(v) {
+  return !!v && typeof v.toArray === 'function' && typeof v.push === 'function' && typeof v.delete === 'function';
+}
+
+function ensureChildrenArray(nodeMap) {
+  if (!isSharedMap(nodeMap)) return null;
+  let arr = nodeMap.get('childrenIds');
+  if (!isSharedArray(arr)) {
+    arr = newChildrenArray();
+    nodeMap.set('childrenIds', arr);
+  }
+  return arr;
+}
+
+function readNodeMap(id, nodeMap) {
+  if (!isSharedMap(nodeMap)) return null;
+  const arr = nodeMap.get('childrenIds');
+  const childrenIds = isSharedArray(arr)
+    ? arr.toArray().map(String)
+    : Array.isArray(arr) ? arr.map(String) : [];
   return {
-    id,
-    text: String(m.get('text') ?? ' '),
-    color: m.get('color') || null,
-    img: m.get('img') || null,
-    collapsed: !!m.get('collapsed'),
-    parentId: m.get('parentId') ?? null,
-    order: Number(m.get('order') ?? 0),
-    childrenIds: []
+    id: String(nodeMap.get('id') || id),
+    text: String(nodeMap.get('text') ?? ' '),
+    color: nodeMap.get('color') || null,
+    img: nodeMap.get('img') || null,
+    collapsed: !!nodeMap.get('collapsed'),
+    childrenIds
   };
 }
 
 function snapshotFlat() {
   const flat = {};
-  yNodeMaps.forEach((m, id) => {
-    const rec = readNodeMap(id, m);
+  yNodes.forEach((nodeMap, id) => {
+    const rec = readNodeMap(id, nodeMap);
     if (rec) flat[id] = rec;
   });
-
-  for (const id in flat) {
-    const pid = flat[id].parentId;
-    if (pid && flat[pid]) flat[pid].childrenIds.push(id);
-  }
-
-  for (const id in flat) {
-    flat[id].childrenIds.sort((a, b) => {
-      const ao = flat[a]?.order ?? 0;
-      const bo = flat[b]?.order ?? 0;
-      return ao - bo || a.localeCompare(b);
-    });
-  }
   return flat;
-}
-
-function childrenOf(parentId, flat = snapshotFlat()) {
-  return (flat[parentId]?.childrenIds || []).map(id => flat[id]).filter(Boolean);
-}
-
-function inferRootId(flat) {
-  const ids = Object.keys(flat);
-  const childSet = new Set();
-  for (const id of ids) {
-    (flat[id].childrenIds || []).forEach(cid => childSet.add(cid));
-  }
-  const explicitRoot = ids.find(id => !flat[id].parentId);
-  return explicitRoot || ids.find(id => !childSet.has(id)) || ids[0] || null;
 }
 
 function flatToTree(flat) {
@@ -460,140 +452,140 @@ function flatToTree(flat) {
       color: r.color || null,
       img: r.img || null,
       collapsed: !!r.collapsed,
-      parentId: r.parentId ?? null,
-      order: Number(r.order ?? 0),
       childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds : [],
       children: []
     };
   }
 
-  let rootId = yMeta.get('rootId');
-  if (!rootId || !nodes[rootId]) rootId = inferRootId(nodes);
+  const rootId = yMeta.get('rootId') || Object.keys(nodes)[0] || null;
   if (!rootId || !nodes[rootId]) return null;
 
   for (const id in nodes) {
     nodes[id].children = nodes[id].childrenIds
       .map(cid => nodes[cid])
-      .filter(Boolean)
-      .sort((a, b) => a.order - b.order || a.id.localeCompare(b.id));
+      .filter(Boolean);
   }
   return nodes[rootId];
 }
 
-function normalizeLegacyFlat(nodes) {
-  const flat = {};
-  for (const id in nodes) {
-    const r = nodes[id] || {};
-    flat[id] = {
-      id: r.id || id,
-      text: r.text || '新主题',
-      color: r.color || null,
-      img: r.img || null,
-      collapsed: !!r.collapsed,
-      parentId: null,
-      order: 0,
-      childrenIds: Array.isArray(r.childrenIds) ? r.childrenIds.filter(Boolean) : []
-    };
-  }
-  for (const id in flat) {
-    flat[id].childrenIds.forEach((cid, idx) => {
-      if (flat[cid]) {
-        flat[cid].parentId = id;
-        flat[cid].order = idx;
-      }
-    });
-  }
-  return flat;
-}
+function seedDefaultV3() {
+  // Deterministic IDs ensure that two clients that both observe an empty room
+  // at nearly the same moment create the exact same logical tree.
+  if (yNodes.size > 0) return false;
 
-function migrateLegacyIfNeeded() {
-  if (yNodeMaps.size > 0 || legacyNodes.size === 0) return false;
-
-  const legacy = {};
-  legacyNodes.forEach((v, k) => { legacy[k] = v; });
-  const flat = normalizeLegacyFlat(legacy);
-  const rootId = inferRootId(flat);
-  if (!rootId) return false;
+  const ids = ['root', 'seed-child-1', 'seed-child-2', 'seed-child-3'];
+  const texts = ['中心主题', '喵一', '喵二', '喵三'];
 
   ydoc.transact(() => {
-    for (const id in flat) {
-      const r = flat[id];
-      yNodeMaps.set(id, makeNodeMap(r));
+    const rootNode = makeNode(ids[0], texts[0]);
+    const rootChildren = ensureChildrenArray(rootNode);
+    const children = [];
+
+    for (let i = 1; i < ids.length; i++) {
+      const child = makeNode(ids[i], texts[i]);
+      yNodes.set(ids[i], child);
+      children.push(ids[i]);
     }
-    yMeta.set('schema', 2);
-    yMeta.set('rootId', rootId);
-  }, 'legacy-migration');
+
+    rootChildren.push(children);
+    yNodes.set(ids[0], rootNode);
+    yMeta.set('schema', 3);
+    yMeta.set('rootId', ids[0]);
+  }, 'seed-v3');
 
   return true;
 }
 
+function findParentId(nodeId) {
+  let parentId = null;
+  yNodes.forEach((nodeMap, id) => {
+    const rec = readNodeMap(id, nodeMap);
+    if (rec && rec.childrenIds.includes(nodeId)) parentId = id;
+  });
+  return parentId;
+}
+
+function getChildIds(parentId) {
+  const parent = yNodes.get(parentId);
+  if (!isSharedMap(parent)) return [];
+  const arr = ensureChildrenArray(parent);
+  return arr ? arr.toArray().map(String) : [];
+}
+
 /* =========================================================
-   7. Yjs 数据操作（字段级修改，不再整条记录 set）
+   7. Yjs 数据操作（字段级 + CRDT 数组）
    ========================================================= */
 function yAddChild(parentId) {
-  const parent = yNodeMaps.get(parentId);
-  if (!(parent instanceof Y.Map)) return null;
+  const parent = yNodes.get(parentId);
+  if (!isSharedMap(parent)) return null;
 
-  const flat = snapshotFlat();
-  const siblings = childrenOf(parentId, flat);
-  const order = siblings.length ? Math.max(...siblings.map(n => n.order)) + 1 : 0;
   const id = rid();
-
   ydoc.transact(() => {
-    yNodeMaps.set(id, makeNodeMap({ id, text: '新主题', parentId, order }));
+    const child = makeNode(id, '新主题');
+    yNodes.set(id, child);
+    const arr = ensureChildrenArray(parent);
     parent.set('collapsed', false);
+    arr.push([id]);
   }, 'add-child');
-
   return id;
 }
 
 function yAddSibling(nodeId) {
-  const rec = readNodeMap(nodeId, yNodeMaps.get(nodeId));
+  const rec = readNodeMap(nodeId, yNodes.get(nodeId));
   if (!rec) return null;
-  if (!rec.parentId) return yAddChild(nodeId);
+  const parentId = findParentId(nodeId);
+  if (!parentId) return yAddChild(nodeId);
 
-  const flat = snapshotFlat();
-  const siblings = childrenOf(rec.parentId, flat);
-  const idx = siblings.findIndex(n => n.id === nodeId);
-  const next = siblings[idx + 1];
-  const order = next ? (rec.order + next.order) / 2 : rec.order + 1;
+  const parent = yNodes.get(parentId);
+  if (!isSharedMap(parent)) return null;
+  const arr = ensureChildrenArray(parent);
+  const ids = arr.toArray().map(String);
+  const idx = ids.indexOf(nodeId);
   const id = rid();
 
   ydoc.transact(() => {
-    yNodeMaps.set(id, makeNodeMap({ id, text: '新主题', parentId: rec.parentId, order }));
-    const parent = yNodeMaps.get(rec.parentId);
-    if (parent instanceof Y.Map) parent.set('collapsed', false);
+    yNodes.set(id, makeNode(id, '新主题'));
+    parent.set('collapsed', false);
+    if (idx < 0) arr.push([id]);
+    else arr.insert(idx + 1, [id]);
   }, 'add-sibling');
-
   return id;
 }
 
 function yRemove(nodeId) {
-  const rec = readNodeMap(nodeId, yNodeMaps.get(nodeId));
-  if (!rec || !rec.parentId) return;
+  const rec = readNodeMap(nodeId, yNodes.get(nodeId));
+  if (!rec) return;
+  const parentId = findParentId(nodeId);
+  if (!parentId) return; // 根节点不可删除
 
-  const flat = snapshotFlat();
   const toDelete = [];
   (function collect(id) {
+    const r = readNodeMap(id, yNodes.get(id));
+    if (!r) return;
     toDelete.push(id);
-    for (const child of childrenOf(id, flat)) collect(child.id);
+    r.childrenIds.forEach(collect);
   })(nodeId);
 
+  const parent = yNodes.get(parentId);
   ydoc.transact(() => {
-    toDelete.forEach(id => yNodeMaps.delete(id));
+    if (isSharedMap(parent)) {
+      const arr = ensureChildrenArray(parent);
+      const idx = arr.toArray().map(String).indexOf(nodeId);
+      if (idx >= 0) arr.delete(idx, 1);
+    }
+    toDelete.forEach(id => yNodes.delete(id));
   }, 'remove-subtree');
 }
 
 function yUpdate(id, patch) {
-  const node = yNodeMaps.get(id);
-  if (!(node instanceof Y.Map)) return;
+  const node = yNodes.get(id);
+  if (!isSharedMap(node)) return;
 
   ydoc.transact(() => {
-    for (const [key, value] of Object.entries(patch || {})) {
-      if (key === 'id' || key === 'parentId' || key === 'order' || key === 'text' || key === 'color' || key === 'img' || key === 'collapsed') {
-        node.set(key, value);
-      }
-    }
+    if (Object.prototype.hasOwnProperty.call(patch, 'text')) node.set('text', patch.text);
+    if (Object.prototype.hasOwnProperty.call(patch, 'color')) node.set('color', patch.color);
+    if (Object.prototype.hasOwnProperty.call(patch, 'img')) node.set('img', patch.img);
+    if (Object.prototype.hasOwnProperty.call(patch, 'collapsed')) node.set('collapsed', !!patch.collapsed);
   }, 'update-node-fields');
 }
 
@@ -725,7 +717,7 @@ function render() {
       tg.addEventListener('pointerdown', ev => ev.stopPropagation());
       tg.addEventListener('click', ev => {
         ev.stopPropagation();
-        const rec = readNodeMap(n.id, yNodeMaps.get(n.id));
+        const rec = yNodes.get(n.id);
         if (rec) yUpdate(n.id, { collapsed: !rec.collapsed });
       });
       el.appendChild(tg);
@@ -754,9 +746,6 @@ function render() {
    9. 从 Yjs 刷新
    ========================================================= */
 function refreshFromYjs() {
-  // 首选新 schema；旧房间在首次同步后自动迁移一次。
-  if (yNodeMaps.size === 0 && legacyNodes.size > 0) migrateLegacyIfNeeded();
-
   const flat = snapshotFlat();
   if (Object.keys(flat).length === 0) {
     root = null;
@@ -775,9 +764,7 @@ function refreshFromYjs() {
   }
 }
 
-// 深度监听：子 Y.Map 字段发生变化时，父 Y.Map 本身不会触发普通 observe，
-// 所以这里必须使用 observeDeep。
-yNodeMaps.observeDeep(() => {
+yNodes.observeDeep(() => {
   if (editingIds.size > 0) {
     pendingRefresh = true;
     return;
@@ -994,7 +981,11 @@ function bindEvents() {
       }
       case 'delete': {
         if (cur === root) { alert('根节点不可删除'); return; }
-        const parentId = cur.parentId || null;
+        // 选中父节点
+        let parentId = null;
+        yNodes.forEach((v, k) => {
+          if (v.childrenIds.includes(cur.id)) parentId = k;
+        });
         yRemove(cur.id);
         if (parentId) selectNode(parentId);
         break;
@@ -1065,16 +1056,26 @@ function bindEvents() {
       try {
         const d = JSON.parse(reader.result);
         const nodes = d.nodes || (d.root ? flatFromTree(d.root) : null);
-        if (!nodes) throw new Error('格式错误');
-        const flat = normalizeLegacyFlat(nodes);
-        const rootId = inferRootId(flat);
-        if (!rootId) throw new Error('没有可用根节点');
+        if (!nodes || typeof nodes !== 'object') throw new Error('格式错误');
+        let rootId = null;
         ydoc.transact(() => {
-          Array.from(yNodeMaps.keys()).forEach(k => yNodeMaps.delete(k));
-          for (const id in flat) yNodeMaps.set(id, makeNodeMap(flat[id]));
-          yMeta.set('schema', 2);
-          yMeta.set('rootId', rootId);
-        }, 'import-document');
+          Array.from(yNodes.keys()).forEach(k => yNodes.delete(k));
+          for (const id in nodes) {
+            const r = nodes[id] || {};
+            const m = makeNode(id, r.text || '新主题');
+            m.set('color', r.color || null);
+            m.set('img', r.img || null);
+            m.set('collapsed', !!r.collapsed);
+            const arr = ensureChildrenArray(m);
+            const childIds = Array.isArray(r.childrenIds) ? r.childrenIds.map(String) : [];
+            if (childIds.length) arr.push(childIds);
+            yNodes.set(id, m);
+            if (!rootId && !(r.parentId)) rootId = id;
+          }
+          if (!rootId) rootId = Object.keys(nodes)[0] || null;
+          if (rootId) yMeta.set('rootId', rootId);
+          yMeta.set('schema', 3);
+        });
         if (d.theme && THEMES[d.theme]) {
           currentTheme = d.theme;
           viewport.style.background = THEMES[currentTheme].bg;
@@ -1106,7 +1107,10 @@ function bindEvents() {
     } else if (e.key === 'Delete' || e.key === 'Backspace') {
       e.preventDefault();
       if (cur === root) return;
-      const parentId = cur.parentId || null;
+      let parentId = null;
+      yNodes.forEach((v, k) => {
+        if (v.childrenIds.includes(cur.id)) parentId = k;
+      });
       yRemove(cur.id);
       if (parentId) selectNode(parentId);
 
@@ -1144,20 +1148,12 @@ function flatFromTree(node, out) {
    13. 连接状态显示
    ========================================================= */
 function updateStatus() {
-  // y-websocket 3.x exposes the public connection flags as wsconnected,
-  // wsconnecting and synced. provider.connected is not the current field.
   const connected = provider.wsconnected === true;
-  const synced = provider.synced === true;
   const peers = provider.awareness ? Math.max(0, provider.awareness.getStates().size - 1) : 0;
   statusDot.classList.remove('online', 'connecting');
-
   if (connected) {
     statusDot.classList.add('online');
-    if (!synced) {
-      statusLabel.textContent = '已连接 · 同步中…';
-    } else {
-      statusLabel.textContent = peers > 0 ? `协作中 · ${peers + 1} 人` : '在线 · 等待加入';
-    }
+    statusLabel.textContent = peers > 0 ? `协作中 · ${peers + 1} 人` : '在线 · 等待加入';
   } else {
     statusDot.classList.add('connecting');
     statusLabel.textContent = provider.wsconnecting === true ? '连接中…' : '正在重连…';
@@ -1165,13 +1161,11 @@ function updateStatus() {
 }
 provider.on('status', updateStatus);
 provider.awareness.on('change', updateStatus);
-setInterval(updateStatus, 2000);
 
 /* =========================================================
    14. 启动
    ========================================================= */
 function init() {
-  // 填充主题下拉
   Object.keys(THEMES).forEach(k => {
     const o = document.createElement('option');
     o.value = k;
@@ -1180,18 +1174,17 @@ function init() {
   });
 
   viewport.style.background = THEMES[currentTheme].bg;
-
   bindEvents();
 
-  // 新房间由 Durable Object 提供 V2 默认文档；旧房间在首次同步后迁移。
   provider.on('sync', isSynced => {
     updateStatus();
-    if (isSynced) {
-      setTimeout(() => {
-        migrateLegacyIfNeeded();
-        if (yNodeMaps.size > 0) refreshFromYjs();
-      }, 100);
-    }
+    if (!isSynced) return;
+
+    // 关键：只有在“完整初始同步完成后”才判断空房间并创建默认树。
+    // 初始化使用固定 ID，所以多个客户端同时执行也不会产生两棵树。
+    if (yNodes.size === 0) seedDefaultV3();
+    refreshFromYjs();
+    setTimeout(refreshFromYjs, 100);
   });
 
   provider.on('status', event => {
@@ -1202,7 +1195,6 @@ function init() {
       room: roomName,
       server: wsServer
     });
-    updateStatus();
   });
 
   provider.on('connection-error', event => {
@@ -1218,8 +1210,7 @@ function init() {
     updateStatus();
   });
 
-  // 若文档已经在本地初始化完成，则立即渲染；正式同步完成后会再次刷新。
-  if (yNodeMaps.size > 0 || legacyNodes.size > 0) refreshFromYjs();
+  updateStatus();
 }
 
 init();
